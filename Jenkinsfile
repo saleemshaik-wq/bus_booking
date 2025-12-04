@@ -1,72 +1,74 @@
 pipeline {
-    agent {
-        label 'slave2'
-    }
-
-    environment {
-        TOMCAT_HOST = '172.31.3.184'
-        TOMCAT_USER = 'root'
-        TOMCAT_DIR = '/opt/apache-tomcat-8.5.98/webapps'
-        JAR_FILE = 'bus-booking-app-1.0-SNAPSHOT.jar'  // Replace with the actual name of your JAR file
-    }
+    agent { label 'slave2' }
 
     stages {
-        stage('checkout') {
+
+        stage('Checkout') {
             steps {
-                sh 'rm -rf bus_booking'
-                sh 'git clone https://github.com/sudhasanshi/bus_booking.git'
+                checkout scm
             }
         }
 
-        stage('build') {
+        stage('Build') {
             steps {
-                script {
-                    def mvnHome = tool 'Maven'
-                    def mvnCMD = "${mvnHome}/bin/mvn"
-                    sh "${mvnCMD} clean install"
-                }
+                sh 'mvn clean install'
             }
         }
 
-        stage('Show Contents of target') {
+        stage('Run Application') {
             steps {
-                script {
-                    // Print the contents of the target directory
-                    sh 'ls -l target'
-                }
+                sh '''
+                    echo "Starting Spring Boot with nohup..."
+                    nohup mvn spring-boot:run > app.log 2>&1 &
+                    echo $! > app.pid
+                    sleep 10
+                '''
             }
         }
 
-        stage('Run JAR Locally') {
+        stage('Validate Application') {
             steps {
-                script {
-                    // Run the JAR file using java -jar
-                    sh "java -jar target/${JAR_FILE}"
-                }
+                sh '''
+                    echo "Waiting for app on 8080..."
+
+                    for i in {1..20}; do
+                        if curl -s http://localhost:8080 >/dev/null; then
+                            echo "App is running!"
+                            exit 0
+                        fi
+                        echo "Not responding yet... retry $i"
+                        sleep 3
+                    done
+
+                    echo "App FAILED to start!"
+                    tail -n 200 app.log || true
+                    exit 1
+                '''
             }
         }
 
-        stage('Deploy JAR to Tomcat') {
+        stage('Wait for 2 minutes') {
             steps {
-                script {
-                    // Copy JAR to Tomcat server
-                    sh "scp target/${JAR_FILE} ${TOMCAT_USER}@${TOMCAT_HOST}:${TOMCAT_DIR}/"
+                sleep(time: 2, unit: 'MINUTES')
+            }
+        }
 
-                    // SSH into Tomcat server and restart Tomcat
-                    sh "ssh ${TOMCAT_USER}@${TOMCAT_HOST} 'bash -s' < restart-tomcat.sh"
-
-                    echo "Application deployed and Tomcat restarted"
-                }
+        stage('Stop Application') {
+            steps {
+                sh '''
+                    if [ -f app.pid ]; then
+                        PID=$(cat app.pid)
+                        echo "Stopping app with PID $PID"
+                        kill $PID || true
+                    fi
+                '''
             }
         }
     }
 
     post {
-        success {
-            echo "Build, Run, and Deployment to Tomcat successful!"
-        }
-        failure {
-            echo "Build, Run, and Deployment to Tomcat failed!"
+        always {
+            echo "Cleaning up..."
         }
     }
 }
